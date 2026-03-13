@@ -11,6 +11,7 @@ from nanovllm.layers.rotary_embedding import get_rope
 from nanovllm.layers.embed_head import VocabParallelEmbedding, ParallelLMHead
 
 
+# Qwen3Attention 类实现 Qwen3 模型的注意力层
 class Qwen3Attention(nn.Module):
 
     def __init__(
@@ -26,19 +27,24 @@ class Qwen3Attention(nn.Module):
         rope_scaling: tuple | None = None,
     ) -> None:
         super().__init__()
+        # 并行处理头数，确保总头数能被并行处理数整除, 张量并行大小
         tp_size = dist.get_world_size()
         self.total_num_heads = num_heads
         assert self.total_num_heads % tp_size == 0
+         # 每个GPU的头数
         self.num_heads = self.total_num_heads // tp_size
         self.total_num_kv_heads = num_kv_heads
         assert self.total_num_kv_heads % tp_size == 0
         self.num_kv_heads = self.total_num_kv_heads // tp_size
         self.head_dim = head_dim or hidden_size // self.total_num_heads
+        # 输入投影层，将隐藏状态映射到查询、键、值向量
         self.q_size = self.num_heads * self.head_dim
         self.kv_size = self.num_kv_heads * self.head_dim
         self.scaling = self.head_dim ** -0.5
         self.qkv_bias = qkv_bias
 
+        # 核心层定义
+        # QKV投影层
         self.qkv_proj = QKVParallelLinear(
             hidden_size,
             self.head_dim,
@@ -46,11 +52,13 @@ class Qwen3Attention(nn.Module):
             self.total_num_kv_heads,
             bias=qkv_bias,
         )
+        # 输出投影层，将注意力输出映射回隐藏状态空间
         self.o_proj = RowParallelLinear(
             self.total_num_heads * self.head_dim,
             hidden_size,
             bias=False,
         )
+        # 旋转位置编码层，用于增强模型对位置信息的理解
         self.rotary_emb = get_rope(
             self.head_dim,
             rotary_dim=self.head_dim,
@@ -58,6 +66,7 @@ class Qwen3Attention(nn.Module):
             base=rope_theta,
             rope_scaling=rope_scaling,
         )
+        # 注意力层，计算注意力权重并进行加权求和
         self.attn = Attention(
             self.num_heads,
             self.head_dim,
@@ -87,6 +96,7 @@ class Qwen3Attention(nn.Module):
         return output
 
 
+# Qwen3MLP 类实现 Qwen3 模型的 MLP 层
 class Qwen3MLP(nn.Module):
 
     def __init__(
@@ -96,16 +106,20 @@ class Qwen3MLP(nn.Module):
         hidden_act: str,
     ) -> None:
         super().__init__()
+        # 前馈网络层，包含门控机制和线性变换
+        # 合并投影：将 gate 和 up 投影合并，减少内存访问次数
         self.gate_up_proj = MergedColumnParallelLinear(
             hidden_size,
             [intermediate_size] * 2,
             bias=False,
         )
+        # 输出投影层，将前馈网络输出映射回隐藏状态空间
         self.down_proj = RowParallelLinear(
             intermediate_size,
             hidden_size,
             bias=False,
         )
+        # 激活函数，这里使用 SiLU 激活函数
         assert hidden_act == "silu"
         self.act_fn = SiluAndMul()
 
@@ -116,6 +130,7 @@ class Qwen3MLP(nn.Module):
         return x
 
 
+# Qwen3DecoderLayer 类实现 Qwen3 模型的解码器层
 class Qwen3DecoderLayer(nn.Module):
 
     def __init__(
@@ -123,6 +138,7 @@ class Qwen3DecoderLayer(nn.Module):
         config: Qwen3Config,
     ) -> None:
         super().__init__()
+        # 自注意力层，计算当前位置的注意力权重并进行加权求和
         self.self_attn = Qwen3Attention(
             hidden_size=config.hidden_size,
             num_heads=config.num_attention_heads,
@@ -134,12 +150,15 @@ class Qwen3DecoderLayer(nn.Module):
             rope_theta=getattr(config, "rope_theta", 1000000),
             rope_scaling=getattr(config, "rope_scaling", None),
         )
+        # 前馈网络层，包含门控机制和线性变换
         self.mlp = Qwen3MLP(
             hidden_size=config.hidden_size,
             intermediate_size=config.intermediate_size,
             hidden_act=config.hidden_act,
         )
+        # 层归一化层，用于归一化隐藏状态
         self.input_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
+        # 后注意力层归一化层，用于归一化前馈网络输出
         self.post_attention_layernorm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
@@ -158,6 +177,7 @@ class Qwen3DecoderLayer(nn.Module):
         return hidden_states, residual
 
 
+# Qwen3Model 类实现 Qwen3 模型的解码器
 class Qwen3Model(nn.Module):
 
     def __init__(
@@ -165,8 +185,11 @@ class Qwen3Model(nn.Module):
         config: Qwen3Config,
     ) -> None:
         super().__init__()
+        # 词嵌入层
         self.embed_tokens = VocabParallelEmbedding(config.vocab_size, config.hidden_size)
+        # 解码器层
         self.layers = nn.ModuleList([Qwen3DecoderLayer(config) for _ in range(config.num_hidden_layers)])
+        # 最终层归一化层
         self.norm = RMSNorm(config.hidden_size, eps=config.rms_norm_eps)
 
     def forward(
@@ -182,12 +205,18 @@ class Qwen3Model(nn.Module):
         return hidden_states
 
 
+# Qwen3ForCausalLM 类实现 Qwen3 模型的因果语言模型
 class Qwen3ForCausalLM(nn.Module):
+    # 模型配置
     packed_modules_mapping = {
+        # 映射 Qwen3Attention 中的 q_proj, k_proj, v_proj 到 qkv_proj
+        # 自注意力层的投影层
         "q_proj": ("qkv_proj", "q"),
         "k_proj": ("qkv_proj", "k"),
         "v_proj": ("qkv_proj", "v"),
+        # 前馈网络层的门控投影层
         "gate_proj": ("gate_up_proj", 0),
+        # 前馈网络层的上投影层
         "up_proj": ("gate_up_proj", 1),
     }
 
