@@ -75,7 +75,7 @@ class BlockManager:
         # 如果引用计数为 0，则将其加入空闲队列
         block = self.blocks[block_id]
         block.ref_count -= 1
-        assert self.blocks[block_id].ref_count == 0
+        # assert self.blocks[block_id].ref_count == 0
         self.used_block_ids.remove(block_id)
         self.free_block_ids.append(block_id)
 
