@@ -148,7 +148,7 @@ class Qwen3DecoderLayer(nn.Module):
             qkv_bias=getattr(config, 'attention_bias', True),
             head_dim=getattr(config, 'head_dim', None),
             rope_theta=getattr(config, "rope_theta", 1000000),
-            rope_scaling=getattr(config, "rope_scaling", None),
+            rope_scaling=None,
         )
         # 前馈网络层，包含门控机制和线性变换
         self.mlp = Qwen3MLP(
